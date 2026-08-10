@@ -1,0 +1,1070 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlickPick — pick something the whole group will watch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<!--
+============================================================================
+ FlickPick — README / API CONTRACT (live)
+============================================================================
+ This page is wired to the real Flask/Lakebase backend — no mock data.
+ `watchlist` now exists as a real table (per FRONTEND_MIGRATION_GUIDE.md,
+ the DB has been seeded with 3 rows) with a UNIQUE(group_id, movie_id)
+ constraint, which is why watchlist/rating actions below are addressed by
+ movie_id rather than a separate row id — one active queue slot per
+ (group, movie) is all the schema allows, which matches the product intent.
+
+ ENDPOINTS THIS PAGE CALLS:
+   GET    /api/groups
+   GET    /api/groups/:id/members                -> [{id, full_name, ...}]
+   GET    /api/tmdb/search?q=&group_id=           -> { results: [movie, ...] }
+   GET    /api/groups/:id/recommendations         -> [{movie_id, title,
+            poster_path, score, reasons}]  (pre-merged across members,
+            server-side, per FRONTEND_MIGRATION_GUIDE.md)
+   GET    /api/groups/:id/watchlist               -> [{movie_id, title,
+            poster_path, added_by_name, created_at}]  (unwatched only)
+   POST   /api/groups/:id/watchlist               {movie_id, added_by_user_id}
+   DELETE /api/groups/:id/watchlist/:movie_id
+   POST   /api/groups/:id/watchlist/:movie_id/watched
+   POST   /api/ratings                            {movie_id, user_id, rating}
+   GET    /api/groups/:id/history                 -> [{movie_id, title,
+            poster_path, watched_at, rating_count, avg_rating}]
+
+   A search-result `movie` object is expected to carry, per the exclusion
+   logic previously computed client-side, now done server-side against
+   `ratings` + `group_members` for the passed group_id:
+     { id, title, original_language, country, overview, poster_path,
+       popularity, duration_minutes, release_date, genres: [...],
+       watched: bool, disliked: bool, group_avg_rating: number|null }
+
+ RECONCILED WITH FRONTEND_MIGRATION_GUIDE.md:
+   - The guide's populateUserSelect snippet reads `u.name`, but every other
+     snippet (and the `users` table itself) uses `full_name` — standardized
+     on `full_name` throughout this file. If the API actually returns
+     `name`, that's a one-line fix in populateUserSelect/openRatingModal.
+   - Movie objects are cached client-side in `movieCache` as they arrive
+     from search/recommendations/watchlist/history responses. Compare pulls
+     straight from that cache (only search results populate the full shape
+     needed for the comparison table) rather than hitting a `GET
+     /api/movies/:id` endpoint, since the guide notes one doesn't exist yet.
+   - Ratings scale (1–5) and "disliked" threshold are now the server's
+     concern (`disliked` arrives as a boolean) — the frontend no longer
+     computes exclusion itself.
+============================================================================
+-->
+<style>
+  :root{
+    --bg: #120F16;
+    --bg-warm: #1A1420;
+    --surface: #1E1926;
+    --surface-2: #26202F;
+    --line: #362E42;
+    --text: #F2EBDD;
+    --text-dim: #A99CB0;
+    --text-faint: #786C88;
+    --gold: #E8B24C;
+    --gold-dim: #B98A32;
+    --gold-glow: rgba(232,178,76,.35);
+    --teal: #45ABA0;
+    --teal-dim: rgba(69,171,160,.18);
+    --rose: #C1554A;
+    --rose-dim: rgba(193,85,74,.18);
+    --radius: 12px;
+    --font-display: 'Bebas Neue', sans-serif;
+    --font-body: 'IBM Plex Sans', -apple-system, sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+  }
+
+  *{ box-sizing: border-box; }
+  html{ scroll-behavior: smooth; }
+  body{
+    margin:0; background: var(--bg); color: var(--text);
+    font-family: var(--font-body); font-size:15px; line-height:1.5;
+    min-height:100vh;
+  }
+  img{ max-width:100%; display:block; }
+  button{ font-family: inherit; cursor:pointer; }
+  select, input{ font-family: inherit; }
+  a{ color: var(--gold); }
+
+  ::selection{ background: var(--gold-glow); }
+
+  @media (prefers-reduced-motion: reduce){
+    *{ animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
+
+  /* ---------- marquee header ---------- */
+  .marquee{
+    background: var(--bg-warm);
+    border-bottom: 1px solid var(--line);
+    position: sticky; top:0; z-index: 40;
+  }
+  .marquee-bulbs{
+    height: 8px;
+    background-image: radial-gradient(circle 2.2px at 8px 4px, var(--gold) 2.2px, transparent 3px);
+    background-size: 18px 8px;
+    background-repeat: repeat-x;
+    opacity:.55;
+  }
+  .marquee-inner{
+    max-width: 1180px; margin:0 auto; padding: 14px 24px 16px;
+    display:flex; align-items:center; gap:24px; flex-wrap:wrap;
+  }
+  .brand{
+    font-family: var(--font-display);
+    font-size: 34px; letter-spacing: .03em;
+    color: var(--text);
+    display:flex; align-items:baseline; gap:2px;
+    margin-right:auto;
+  }
+  .brand em{ font-style:normal; color: var(--gold); }
+  .brand small{
+    font-family: var(--font-mono); font-size:10px; letter-spacing:.12em;
+    color: var(--text-faint); text-transform:uppercase; margin-left:10px;
+    align-self:center;
+  }
+
+  .who-picker{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .field-label{
+    font-family: var(--font-mono); font-size:10px; text-transform:uppercase;
+    letter-spacing:.1em; color: var(--text-faint); display:block; margin-bottom:4px;
+  }
+  .select-wrap select{
+    background: var(--surface); color: var(--text); border:1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font-size:13px; font-weight:500;
+    min-width:150px;
+  }
+  .select-wrap select:focus-visible{ outline:2px solid var(--gold); outline-offset:2px; }
+
+  /* ---------- tab nav (ticket stubs) ---------- */
+  .tabs{
+    max-width:1180px; margin:0 auto; padding: 0 24px;
+    display:flex; gap:10px; overflow-x:auto;
+  }
+  .tab-btn{
+    background: var(--surface); color: var(--text-dim); border:1px solid var(--line);
+    border-bottom:none; border-radius: 10px 10px 0 0;
+    padding: 10px 18px 12px; font-size:13px; font-weight:600;
+    letter-spacing:.02em; white-space:nowrap;
+    transform: translateY(1px);
+    transition: color .15s ease, background .15s ease;
+  }
+  .tab-btn .count{
+    font-family: var(--font-mono); font-size:11px; color: var(--text-faint);
+    margin-left:6px;
+  }
+  .tab-btn[aria-selected="true"]{
+    background: var(--bg); color: var(--text); border-color: var(--line);
+    border-bottom: 1px solid var(--bg);
+  }
+  .tab-btn:hover{ color: var(--text); }
+  .tab-btn:focus-visible{ outline:2px solid var(--gold); outline-offset:2px; }
+
+  main{ max-width:1180px; margin:0 auto; padding: 28px 24px 80px; border-top:1px solid var(--line); }
+  .panel{ display:none; }
+  .panel.active{ display:block; animation: fade .25s ease; }
+  @keyframes fade{ from{ opacity:0; transform: translateY(4px);} to{ opacity:1; transform:none; } }
+
+  section + section{ margin-top: 40px; }
+
+  h2.section-title{
+    font-family: var(--font-display); font-size:26px; letter-spacing:.02em;
+    margin: 0 0 4px; color: var(--text);
+  }
+  p.section-sub{ margin:0 0 18px; color: var(--text-dim); font-size:13.5px; }
+
+  /* ---------- search ---------- */
+  .search-row{ display:flex; gap:10px; margin-bottom: 22px; }
+  .search-row input[type="search"]{
+    flex:1; background: var(--surface); border:1px solid var(--line); color: var(--text);
+    border-radius: 10px; padding: 12px 14px; font-size:14px;
+  }
+  .search-row input[type="search"]::placeholder{ color: var(--text-faint); }
+  .search-row input:focus-visible{ outline:2px solid var(--gold); outline-offset:1px; }
+  .search-row button{
+    background: var(--gold); color:#1A1206; border:none; border-radius:10px;
+    padding: 0 22px; font-weight:700; font-size:13px; letter-spacing:.03em;
+  }
+  .search-row button:hover{ background:#f0bd5f; }
+
+  .empty-state{
+    border:1px dashed var(--line); border-radius: var(--radius); padding: 34px 20px;
+    text-align:center; color: var(--text-dim); font-size:13.5px;
+  }
+  .empty-state strong{ display:block; color:var(--text); font-size:15px; margin-bottom:4px; font-weight:600; }
+
+  /* ---------- recommendation ribbon ---------- */
+  .rec-rail{ display:flex; gap:16px; overflow-x:auto; padding-bottom:10px; margin-bottom:8px; }
+  .rec-card{
+    flex: 0 0 240px; background: var(--surface); border:1px solid var(--line);
+    border-radius: var(--radius); overflow:hidden; position:relative;
+  }
+  .rec-card .poster{ aspect-ratio: 2/3; background: var(--surface-2); overflow:hidden; }
+  .rec-card .poster img{ width:100%; height:100%; object-fit:cover; }
+  .rec-score{
+    position:absolute; top:8px; right:8px; background: rgba(18,15,22,.85);
+    border:1px solid var(--gold-dim); color: var(--gold); font-family: var(--font-mono);
+    font-size:11px; font-weight:600; padding:3px 7px; border-radius:6px;
+  }
+  .rec-body{ padding: 12px 14px 14px; }
+  .rec-title{ font-weight:600; font-size:14px; margin:0 0 6px; }
+  .rec-reason{
+    font-size:12px; color: var(--gold); background: var(--gold-glow); background:rgba(232,178,76,.1);
+    border-left:2px solid var(--gold-dim); padding: 6px 8px; border-radius: 0 6px 6px 0;
+    line-height:1.4;
+  }
+
+  /* ---------- ticket-stub movie card (perforated) ---------- */
+  .movie-grid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(320px,1fr)); gap:16px; }
+  .movie-card{
+    display:grid; grid-template-columns: 96px 14px 1fr;
+    background: var(--surface); border:1px solid var(--line); border-radius: var(--radius);
+    overflow:hidden; position:relative;
+  }
+  .movie-card.excluded{ opacity:.55; }
+  .movie-card .poster{ background: var(--surface-2); overflow:hidden; }
+  .movie-card .poster img{ width:100%; height:100%; object-fit:cover; aspect-ratio: 2/3; }
+  .perf{
+    background-image: radial-gradient(circle 2.4px at 7px 8px, var(--bg) 2.4px, transparent 3px);
+    background-size: 14px 16px; background-repeat: repeat-y; background-position: top;
+  }
+  .movie-info{ padding: 12px 14px 12px 12px; min-width:0; display:flex; flex-direction:column; gap:6px; }
+  .movie-title-row{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .movie-title{ font-weight:600; font-size:14.5px; margin:0; }
+  .movie-year{ font-family: var(--font-mono); font-size:11.5px; color: var(--text-faint); }
+  .movie-meta{ font-size:11.5px; color: var(--text-dim); display:flex; gap:10px; flex-wrap:wrap; font-family: var(--font-mono); }
+  .genre-pills{ display:flex; gap:5px; flex-wrap:wrap; }
+  .pill{
+    font-size:10.5px; padding: 2px 8px; border-radius:20px; font-weight:600;
+    letter-spacing:.02em; border:1px solid transparent;
+  }
+  .pill.g0{ background: var(--teal-dim); color: var(--teal); border-color: rgba(69,171,160,.35); }
+  .pill.g1{ background: rgba(232,178,76,.12); color: var(--gold); border-color: var(--gold-dim); }
+  .pill.g2{ background: var(--rose-dim); color: var(--rose); border-color: rgba(193,85,74,.35); }
+  .overview{ font-size:12.5px; color: var(--text-dim); line-height:1.45;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+
+  .status-badge{
+    font-family: var(--font-mono); font-size:10.5px; font-weight:600; letter-spacing:.03em;
+    padding: 3px 8px; border-radius:6px; display:inline-flex; align-items:center; gap:5px;
+    width:fit-content; text-transform:uppercase;
+  }
+  .status-badge.watched{ background: var(--surface-2); color: var(--text-dim); border:1px solid var(--line); }
+  .status-badge.disliked{ background: var(--rose-dim); color: var(--rose); border:1px solid rgba(193,85,74,.35); }
+
+  .card-actions{ display:flex; gap:8px; margin-top:2px; flex-wrap:wrap; }
+  .btn{
+    border-radius:8px; border:1px solid var(--line); background: var(--surface-2); color: var(--text);
+    font-size:11.5px; font-weight:600; padding: 6px 10px; letter-spacing:.01em;
+    display:inline-flex; align-items:center; gap:5px; transition: border-color .15s ease, color .15s ease;
+  }
+  .btn:hover{ border-color: var(--gold-dim); }
+  .btn:focus-visible{ outline:2px solid var(--gold); outline-offset:1px; }
+  .btn.primary{ background: var(--gold); color:#1A1206; border-color: var(--gold); }
+  .btn.primary:hover{ background:#f0bd5f; }
+  .btn.primary:disabled{ background: var(--surface-2); color: var(--text-faint); border-color: var(--line); cursor:default; }
+  .btn.ghost{ background:transparent; }
+  .btn.danger{ color: var(--rose); }
+  .btn.danger:hover{ border-color: var(--rose); }
+  .btn.compare.active{ background: var(--teal-dim); color: var(--teal); border-color: rgba(69,171,160,.4); }
+
+  /* ---------- compare ---------- */
+  .compare-table-wrap{ overflow-x:auto; border:1px solid var(--line); border-radius: var(--radius); }
+  table.compare{ border-collapse: collapse; width:100%; min-width: 640px; }
+  table.compare th, table.compare td{
+    padding: 12px 14px; text-align:left; border-bottom:1px solid var(--line);
+    font-size:13px; vertical-align:top;
+  }
+  table.compare th.row-label{
+    font-family: var(--font-mono); font-size:10.5px; text-transform:uppercase; color: var(--text-faint);
+    letter-spacing:.08em; white-space:nowrap; background: var(--surface); position:sticky; left:0;
+  }
+  table.compare td{ background: var(--bg); }
+  table.compare thead th{
+    background: var(--surface); border-bottom:2px solid var(--line); min-width:180px;
+  }
+  .compare-head{ display:flex; flex-direction:column; gap:8px; }
+  .compare-head img{ width:64px; border-radius:6px; aspect-ratio:2/3; object-fit:cover; }
+  .compare-remove{
+    align-self:flex-start; font-family: var(--font-mono); font-size:10px; color: var(--text-faint);
+    background:none; border:none; text-decoration:underline; padding:0;
+  }
+  .compare-remove:hover{ color: var(--rose); }
+  .best{ color: var(--gold); font-weight:700; }
+
+  /* ---------- watchlist / history rows ---------- */
+  .row-list{ display:flex; flex-direction:column; gap:10px; }
+  .list-row{
+    display:grid; grid-template-columns: 56px 1fr auto; gap:14px; align-items:center;
+    background: var(--surface); border:1px solid var(--line); border-radius: 10px; padding: 10px 14px;
+  }
+  .list-row img{ width:56px; aspect-ratio:2/3; object-fit:cover; border-radius:5px; }
+  .list-row .title{ font-weight:600; font-size:13.5px; margin:0 0 3px; }
+  .list-row .sub{ font-size:11.5px; color: var(--text-dim); font-family: var(--font-mono); }
+  .row-actions{ display:flex; gap:8px; }
+
+  .avg-badge{
+    font-family: var(--font-mono); font-size:12px; font-weight:700; color: var(--gold);
+    background: rgba(232,178,76,.1); border:1px solid var(--gold-dim); border-radius:6px;
+    padding: 3px 8px; white-space:nowrap;
+  }
+  .avg-badge.low{ color: var(--rose); background: var(--rose-dim); border-color: rgba(193,85,74,.35); }
+
+  /* ---------- modal ---------- */
+  .modal-backdrop{
+    position:fixed; inset:0; background: rgba(9,7,12,.72); display:none;
+    align-items:center; justify-content:center; z-index:100; padding:20px;
+  }
+  .modal-backdrop.open{ display:flex; }
+  .modal{
+    background: var(--bg-warm); border:1px solid var(--line); border-radius: 14px;
+    padding: 24px; max-width: 420px; width:100%;
+  }
+  .modal h3{ font-family: var(--font-display); font-size:22px; margin:0 0 4px; letter-spacing:.02em; }
+  .modal p.hint{ color: var(--text-dim); font-size:12.5px; margin:0 0 18px; }
+  .rate-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+  .rate-row .name{ font-size:13.5px; font-weight:500; }
+  .stars{ display:flex; gap:3px; }
+  .stars button{
+    background:none; border:none; font-size:20px; color: var(--line); line-height:1; padding:2px;
+  }
+  .stars button.filled{ color: var(--gold); }
+  .stars button:focus-visible{ outline:2px solid var(--gold); border-radius:4px; }
+  .modal-actions{ display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+
+  .toast{
+    position:fixed; bottom:22px; left:50%; transform: translateX(-50%) translateY(20px);
+    background: var(--surface); border:1px solid var(--gold-dim); color: var(--text);
+    padding: 10px 18px; border-radius: 10px; font-size:13px; opacity:0; pointer-events:none;
+    transition: all .25s ease; z-index:200; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  }
+  .toast.show{ opacity:1; transform: translateX(-50%) translateY(0); }
+
+  footer{
+    max-width:1180px; margin:0 auto; padding: 20px 24px 40px; color: var(--text-faint);
+    font-size:11px; border-top:1px solid var(--line); margin-top:40px;
+  }
+
+  @media (max-width: 640px){
+    .marquee-inner{ padding: 14px 16px; }
+    main{ padding: 22px 16px 60px; }
+    .movie-card{ grid-template-columns: 76px 12px 1fr; }
+    table.compare thead th, table.compare td{ min-width:150px; }
+  }
+
+  /* ---------- async loading / error states ---------- */
+  .loading, .error-state{
+    text-align:center; padding: 34px 20px; color: var(--text-dim); font-size:13px;
+    border:1px dashed var(--line); border-radius: var(--radius);
+  }
+  .error-state{ color: var(--rose); border-color: rgba(193,85,74,.35); }
+  .loading::after{ content:"…"; animation: loading-dots 1.4s steps(4,end) infinite; }
+  @keyframes loading-dots{
+    0%, 20%{ content:"."; } 40%{ content:".."; } 60%, 100%{ content:"..."; }
+  }
+</style>
+</head>
+<body>
+
+<header class="marquee">
+  <div class="marquee-bulbs" aria-hidden="true"></div>
+  <div class="marquee-inner">
+    <div class="brand">FLICK<em>PICK</em><small>group movie night</small></div>
+    <div class="who-picker">
+      <div class="select-wrap">
+        <span class="field-label">Group</span>
+        <select id="groupSelect"></select>
+      </div>
+      <div class="select-wrap">
+        <span class="field-label">Watching as</span>
+        <select id="userSelect"></select>
+      </div>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist" aria-label="FlickPick sections">
+    <button class="tab-btn" role="tab" data-tab="discover" aria-selected="true">Discover</button>
+    <button class="tab-btn" role="tab" data-tab="compare">Compare<span class="count" id="compareCount"></span></button>
+    <button class="tab-btn" role="tab" data-tab="watchlist">Watchlist<span class="count" id="watchlistCount"></span></button>
+    <button class="tab-btn" role="tab" data-tab="history">History</button>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ============ DISCOVER ============ -->
+  <section class="panel active" id="panel-discover">
+    <section>
+      <h2 class="section-title">For your group</h2>
+      <p class="section-sub" id="recSub">Blended from everyone's individual picks — already-watched and disliked titles are filtered out.</p>
+      <div class="rec-rail" id="recRail"></div>
+    </section>
+
+    <section>
+      <h2 class="section-title">Search TMDB</h2>
+      <p class="section-sub">Titles your group has already watched or didn't like are flagged, not hidden — you can still add them for a rewatch.</p>
+      <div class="search-row">
+        <input type="search" id="searchInput" placeholder="Search for a movie… try “dune” or “ghibli”" aria-label="Search movies">
+        <button id="searchBtn">Search</button>
+      </div>
+      <div id="searchResults"></div>
+    </section>
+  </section>
+
+  <!-- ============ COMPARE ============ -->
+  <section class="panel" id="panel-compare">
+    <h2 class="section-title">Compare</h2>
+    <p class="section-sub">Add up to 4 movies from Discover using “Compare.” Best-in-row values are highlighted.</p>
+    <div id="compareArea"></div>
+  </section>
+
+  <!-- ============ WATCHLIST ============ -->
+  <section class="panel" id="panel-watchlist">
+    <h2 class="section-title">Group watchlist</h2>
+    <p class="section-sub">Queued for movie night. Mark a title watched once you've all seen it to unlock ratings.</p>
+    <div id="watchlistArea" class="row-list"></div>
+  </section>
+
+  <!-- ============ HISTORY ============ -->
+  <section class="panel" id="panel-history">
+    <h2 class="section-title">Watch history</h2>
+    <p class="section-sub">Everything the group has watched, with each member's rating.</p>
+    <div id="historyArea" class="row-list"></div>
+  </section>
+
+</main>
+
+<footer>
+  This product uses the TMDB API but is not endorsed or certified by TMDB.
+</footer>
+
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h3 id="modalTitle">Rate it</h3>
+    <p class="hint" id="modalHint">Every group member rates once this is marked watched.</p>
+    <div id="modalBody"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="modalCancel">Cancel</button>
+      <button class="btn primary" id="modalSave">Save &amp; mark watched</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* =========================================================
+     IMAGE HELPERS
+  ========================================================= */
+  const IMG = (path) => path ? `https://image.tmdb.org/t/p/w342${path}` : "";
+  const PLACEHOLDER = "data:image/svg+xml;utf8," + encodeURIComponent(
+    `<svg xmlns='http://www.w3.org/2000/svg' width='200' height='300'><rect width='100%' height='100%' fill='#26202F'/><text x='50%' y='50%' fill='#786C88' font-family='sans-serif' font-size='14' text-anchor='middle'>No poster</text></svg>`
+  );
+
+  /* =========================================================
+     API LAYER — live backend. See the top-of-file comment block
+     for the full endpoint contract this page relies on.
+  ========================================================= */
+  const movieCache = new Map(); // movie_id -> richest movie object seen so far
+
+  async function apiCall(url, options = {}){
+    let response;
+    try {
+      response = await fetch(url, {
+        ...options,
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      });
+    } catch (networkErr) {
+      console.error("Network error:", networkErr);
+      showToast("Network error — is the server running?");
+      throw networkErr;
+    }
+    if (!response.ok){
+      let errorMsg = `Server error (${response.status})`;
+      try {
+        const errorData = await response.json();
+        if (errorData.error) errorMsg = errorData.error;
+        console.error("API Error:", response.status, errorData);
+      } catch (e) {
+        console.error("API Error:", response.status, url);
+      }
+      showToast(errorMsg);
+      throw new Error(`HTTP ${response.status} for ${url}`);
+    }
+    if (response.status === 204) return null;
+    return await response.json();
+  }
+
+  function cacheMovie(movie){
+    if (!movie || movie.id == null) return movie;
+    const merged = { ...(movieCache.get(movie.id) || {}), ...movie };
+    movieCache.set(movie.id, merged);
+    return merged;
+  }
+  function getCachedMovie(id){ return movieCache.get(id) || null; }
+
+  async function getGroupMembers(groupId){
+    // GET /api/groups/:id/members
+    return await apiCall(`/api/groups/${groupId}/members`);
+  }
+
+  async function getWatchlist(groupId){
+    // GET /api/groups/:id/watchlist — unwatched rows only, flattened with movie fields
+    const rows = await apiCall(`/api/groups/${groupId}/watchlist`);
+    rows.forEach(r => cacheMovie({ id: r.movie_id, title: r.title, poster_path: r.poster_path }));
+    return rows;
+  }
+
+  async function addToWatchlist(groupId, movieId, userId){
+    // POST /api/groups/:id/watchlist  {movie_id, added_by_user_id}
+    try {
+      await apiCall(`/api/groups/${groupId}/watchlist`, {
+        method: "POST",
+        body: JSON.stringify({ movie_id: movieId, added_by_user_id: userId }),
+      });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false };
+    }
+  }
+
+  async function removeFromWatchlist(groupId, movieId){
+    // DELETE /api/groups/:id/watchlist/:movie_id
+    await apiCall(`/api/groups/${groupId}/watchlist/${movieId}`, { method: "DELETE" });
+  }
+
+  async function markWatchedWithRatings(groupId, movieId, ratingsByUser){
+    // POST /api/groups/:id/watchlist/:movie_id/watched, then POST /api/ratings per member
+    await apiCall(`/api/groups/${groupId}/watchlist/${movieId}/watched`, { method: "POST" });
+    const entries = Object.entries(ratingsByUser).filter(([, rating]) => rating);
+    await Promise.all(entries.map(([userId, rating]) =>
+      apiCall("/api/ratings", {
+        method: "POST",
+        body: JSON.stringify({ movie_id: movieId, user_id: Number(userId), rating }),
+      })
+    ));
+  }
+
+  async function getHistory(groupId){
+    // GET /api/groups/:id/history
+    const rows = await apiCall(`/api/groups/${groupId}/history`);
+    rows.forEach(r => cacheMovie({ id: r.movie_id, title: r.title, poster_path: r.poster_path }));
+    return rows;
+  }
+
+  async function getGroupRecommendations(groupId){
+    // GET /api/groups/:id/recommendations — pre-merged across members, server-side
+    const recs = await apiCall(`/api/groups/${groupId}/recommendations`);
+    recs.forEach(r => cacheMovie({ id: r.movie_id, title: r.title, poster_path: r.poster_path }));
+    return recs;
+  }
+
+  async function searchMovies(query, groupId){
+    // GET /api/tmdb/search?q=&group_id= — TMDB proxied server-side, annotated
+    // with { watched, disliked, group_avg_rating } for the active group.
+    if (!query.trim()) return [];
+    try {
+      const data = await apiCall(`/api/tmdb/search?q=${encodeURIComponent(query)}&group_id=${groupId}`);
+      const results = data.results || [];
+      results.forEach(cacheMovie);
+      return results;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /* =========================================================
+     STATE
+  ========================================================= */
+  const state = {
+    groupId: null,
+    userId: null,
+    tab: "discover",
+    compareIds: [],
+    searchQuery: "",
+    pendingMovieId: null,
+  };
+
+  /* =========================================================
+     RENDER HELPERS
+  ========================================================= */
+  function fmtYear(dateStr){ return dateStr ? String(dateStr).slice(0,4) : "—"; }
+  function fmtDuration(min){
+    if (!min) return "—";
+    const h = Math.floor(min / 60), m = min % 60;
+    return `${h}h ${m}m`;
+  }
+  function fmtPop(p){ return p != null ? Number(p).toFixed(1) : "—"; }
+  function genrePillClass(i){ return `pill g${i % 3}`; }
+  function escapeHtml(s){
+    return String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+
+  function starsMarkup(avg){
+    if (avg == null) return `<span style="color:var(--text-faint); font-family:var(--font-mono); font-size:11.5px;">not yet rated</span>`;
+    const full = Math.round(avg);
+    let out = "";
+    for (let i=1;i<=5;i++) out += i <= full ? "★" : "☆";
+    const cls = avg <= 2 ? "low" : "";
+    return `<span class="avg-badge ${cls}">${out} ${Number(avg).toFixed(1)}</span>`;
+  }
+
+  function movieCard(movie){
+    const inCompare = state.compareIds.includes(movie.id);
+    const genres = movie.genres || [];
+    const genrePills = genres.map((g,i) => `<span class="${genrePillClass(i)}">${escapeHtml(g)}</span>`).join("");
+    const badges = [
+      movie.watched ? `<span class="status-badge watched">✓ Watched by group</span>` : "",
+      movie.disliked ? `<span class="status-badge disliked">✕ Group disliked${movie.group_avg_rating != null ? ` (${Number(movie.group_avg_rating).toFixed(1)}★)` : ""}</span>` : "",
+    ].join("");
+
+    const showOriginalTitle = movie.original_title && movie.original_title !== movie.title;
+    return `
+      <div class="movie-card ${movie.watched || movie.disliked ? "excluded" : ""}" data-movie-id="${movie.id}">
+        <div class="poster"><img src="${IMG(movie.poster_path)}" alt="${escapeHtml(movie.title)} poster" loading="lazy" onerror="this.src='${PLACEHOLDER}'"></div>
+        <div class="perf" aria-hidden="true"></div>
+        <div class="movie-info">
+          <div class="movie-title-row">
+            <p class="movie-title">${escapeHtml(movie.title)}</p>
+            <span class="movie-year">${fmtYear(movie.release_date)}</span>
+          </div>
+          ${showOriginalTitle ? `<div style="font-size:11.5px;color:var(--text-dim);margin:-2px 0 4px;font-style:italic;">Original: ${escapeHtml(movie.original_title)}</div>` : ""}
+          ${badges}
+          <div class="genre-pills">${genrePills}</div>
+          <p class="overview">${escapeHtml(movie.overview || "")}</p>
+          <div class="movie-meta">
+            <span>${fmtDuration(movie.duration_minutes)}</span>
+            <span>${(movie.original_language || "").toUpperCase()}</span>
+            <span>pop ${fmtPop(movie.popularity)}</span>
+          </div>
+          <div class="card-actions">
+            <button class="btn primary" data-action="watchlist" data-id="${movie.id}" ${movie.watched ? "disabled" : ""}>
+              ${movie.watched ? "Already watched" : "+ Watchlist"}
+            </button>
+            <button class="btn ghost compare ${inCompare ? "active" : ""}" data-action="compare" data-id="${movie.id}">${inCompare ? "✓ Comparing" : "Compare"}</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  /* =========================================================
+     TAB SWITCHING
+  ========================================================= */
+  function switchTab(tab){
+    state.tab = tab;
+    document.querySelectorAll(".tab-btn").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
+    document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === `panel-${tab}`));
+    if (tab === "compare") renderCompare();
+    if (tab === "watchlist") renderWatchlist();
+    if (tab === "history") renderHistory();
+  }
+
+  /* =========================================================
+     RENDER: DISCOVER
+  ========================================================= */
+  async function renderRecommendations(){
+    const rail = document.getElementById("recRail");
+    rail.innerHTML = `<div class="loading">Loading recommendations</div>`;
+    try {
+      const [recs, members] = await Promise.all([
+        getGroupRecommendations(state.groupId),
+        getGroupMembers(state.groupId),
+      ]);
+      document.getElementById("recSub").textContent =
+        `Blended from all ${members.length} members' individual picks — already-watched and disliked titles are filtered out.`;
+
+      if (!recs.length){
+        rail.innerHTML = `<div class="empty-state" style="width:100%"><strong>No fresh recommendations right now</strong>Rate a few more movies together and new picks will show up here.</div>`;
+        return;
+      }
+      rail.innerHTML = recs.map(r => `
+        <div class="rec-card">
+          <div class="poster"><img src="${IMG(r.poster_path)}" alt="${escapeHtml(r.title)}" loading="lazy" onerror="this.src='${PLACEHOLDER}'"></div>
+          <div class="rec-score">${Number(r.score).toFixed(0)}</div>
+          <div class="rec-body">
+            <p class="rec-title">${escapeHtml(r.title)}</p>
+            <div class="rec-reason">${escapeHtml(r.reasons || r.reason || "")}</div>
+          </div>
+        </div>`).join("");
+    } catch (e) {
+      rail.innerHTML = `<div class="error-state">Couldn't load recommendations.</div>`;
+    }
+  }
+
+  async function renderSearch(){
+    const el = document.getElementById("searchResults");
+    if (!state.searchQuery.trim()){
+      el.innerHTML = `<div class="empty-state"><strong>Search for something to watch</strong>Try a title, or a genre like “comedy” or “animation.”</div>`;
+      return;
+    }
+    el.innerHTML = `<div class="loading">Searching</div>`;
+    try {
+      const results = await searchMovies(state.searchQuery, state.groupId);
+      if (!results.length){
+        el.innerHTML = `<div class="empty-state"><strong>No matches for "${escapeHtml(state.searchQuery)}"</strong>Try a different title or genre.</div>`;
+        return;
+      }
+      el.innerHTML = `<div class="movie-grid">${results.map(movieCard).join("")}</div>`;
+    } catch (e) {
+      el.innerHTML = `<div class="error-state">Search failed.</div>`;
+    }
+  }
+
+  async function renderDiscover(){
+    await Promise.all([renderRecommendations(), renderSearch()]);
+  }
+
+  /* =========================================================
+     RENDER: COMPARE
+     Sourced from movieCache — populated by search results, which are the
+     only cards with a "Compare" affordance and the only response shape
+     rich enough (genres, runtime, popularity, group_avg_rating) for this.
+  ========================================================= */
+  const COMPARE_ROWS = [
+    { label: "Genres", fmt: m => (m.genres || []).join(", ") },
+    { label: "Original Title", fmt: m => m.original_title || m.title || "—" },
+    { label: "Released", fmt: m => m.release_date || "—" },
+    { label: "Runtime", fmt: m => fmtDuration(m.duration_minutes), numeric: true, better: "low", raw: m => m.duration_minutes },
+    { label: "Language", fmt: m => (m.original_language || "").toUpperCase() },
+    { label: "Country", fmt: m => m.country || "—" },
+    { label: "Popularity", fmt: m => fmtPop(m.popularity), numeric: true, better: "high", raw: m => m.popularity },
+    { label: "Group rating", fmt: m => starsMarkup(m.group_avg_rating), numeric: true, better: "high", raw: m => m.group_avg_rating },
+    { label: "Overview", fmt: m => m.overview || "—" },
+  ];
+
+  function renderCompare(){
+    const area = document.getElementById("compareArea");
+    const movies = state.compareIds.map(getCachedMovie).filter(Boolean);
+    if (!movies.length){
+      area.innerHTML = `<div class="empty-state"><strong>Nothing to compare yet</strong>Go to Discover and tap “Compare” on up to 4 movies.</div>`;
+      return;
+    }
+
+    const rowsHtml = COMPARE_ROWS.map(row => {
+      let bestVal = null;
+      if (row.numeric){
+        const vals = movies.map(m => row.raw(m));
+        const valid = vals.filter(v => v != null && !isNaN(v));
+        if (valid.length) bestVal = row.better === "low" ? Math.min(...valid) : Math.max(...valid);
+      }
+      const cells = movies.map(m => {
+        const val = row.raw ? row.raw(m) : null;
+        const isBest = row.numeric && bestVal != null && val === bestVal && movies.length > 1;
+        return `<td class="${isBest ? "best" : ""}">${row.fmt(m)}</td>`;
+      }).join("");
+      return `<tr><th class="row-label">${row.label}</th>${cells}</tr>`;
+    }).join("");
+
+    const headHtml = movies.map(m => `
+      <th>
+        <div class="compare-head">
+          <img src="${IMG(m.poster_path)}" alt="" onerror="this.src='${PLACEHOLDER}'">
+          <strong>${escapeHtml(m.title)}</strong>
+          <button class="compare-remove" data-action="remove-compare" data-id="${m.id}">remove</button>
+        </div>
+      </th>`).join("");
+
+    area.innerHTML = `
+      <div class="compare-table-wrap">
+        <table class="compare">
+          <thead><tr><th></th>${headHtml}</tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>`;
+  }
+
+  /* =========================================================
+     RENDER: WATCHLIST
+  ========================================================= */
+  async function renderWatchlist(){
+    const area = document.getElementById("watchlistArea");
+    area.innerHTML = `<div class="loading">Loading watchlist</div>`;
+    try {
+      const rows = await getWatchlist(state.groupId);
+      document.getElementById("watchlistCount").textContent = rows.length ? ` ${rows.length}` : "";
+      if (!rows.length){
+        area.innerHTML = `<div class="empty-state"><strong>The watchlist is empty</strong>Add movies from Discover to queue them up for movie night.</div>`;
+        return;
+      }
+      area.innerHTML = rows.map(w => `
+        <div class="list-row">
+          <img src="${IMG(w.poster_path)}" alt="" onerror="this.src='${PLACEHOLDER}'">
+          <div>
+            <p class="title">${escapeHtml(w.title)}</p>
+            <p class="sub">added by ${escapeHtml(w.added_by_name || "someone")} · ${w.created_at}</p>
+          </div>
+          <div class="row-actions">
+            <button class="btn primary" data-action="mark-watched" data-id="${w.movie_id}">Mark watched</button>
+            <button class="btn ghost danger" data-action="remove-watchlist" data-id="${w.movie_id}">Remove</button>
+          </div>
+        </div>`).join("");
+    } catch (e) {
+      area.innerHTML = `<div class="error-state">Couldn't load the watchlist.</div>`;
+    }
+  }
+
+  /* =========================================================
+     RENDER: HISTORY
+  ========================================================= */
+  async function renderHistory(){
+    const area = document.getElementById("historyArea");
+    area.innerHTML = `<div class="loading">Loading history</div>`;
+    try {
+      const rows = await getHistory(state.groupId);
+      if (!rows.length){
+        area.innerHTML = `<div class="empty-state"><strong>Nothing watched yet</strong>Once you mark a watchlist title watched, it'll show up here with everyone's ratings.</div>`;
+        return;
+      }
+      area.innerHTML = rows
+        .slice()
+        .sort((a,b) => new Date(b.watched_at) - new Date(a.watched_at))
+        .map(h => `
+          <div class="list-row">
+            <img src="${IMG(h.poster_path)}" alt="" onerror="this.src='${PLACEHOLDER}'">
+            <div>
+              <p class="title">${escapeHtml(h.title)}</p>
+              <p class="sub">watched ${h.watched_at} · ${h.rating_count ?? 0} rating${(h.rating_count ?? 0) === 1 ? "" : "s"}</p>
+            </div>
+            <div class="row-actions">${starsMarkup(h.avg_rating ?? null)}</div>
+          </div>`).join("");
+    } catch (e) {
+      area.innerHTML = `<div class="error-state">Couldn't load history.</div>`;
+    }
+  }
+
+  /* =========================================================
+     MODAL — rate + mark watched
+  ========================================================= */
+  const modalBackdrop = document.getElementById("modalBackdrop");
+  const modalBody = document.getElementById("modalBody");
+  let pendingRatings = {};
+
+  async function openRatingModal(movieId){
+    state.pendingMovieId = movieId;
+    pendingRatings = {};
+    const cached = getCachedMovie(movieId);
+
+    document.getElementById("modalTitle").textContent = `Rate “${cached?.title || "this movie"}”`;
+    document.getElementById("modalHint").textContent = "Everyone in the group who watched it can rate now, or later.";
+    modalBody.innerHTML = `<div class="loading">Loading group members</div>`;
+    modalBackdrop.classList.add("open");
+
+    try {
+      const members = await getGroupMembers(state.groupId);
+      modalBody.innerHTML = members.map(u => `
+        <div class="rate-row">
+          <span class="name">${escapeHtml(u.full_name)}</span>
+          <span class="stars" data-user="${u.id}">
+            ${[1,2,3,4,5].map(n => `<button type="button" data-star="${n}" aria-label="${n} star">★</button>`).join("")}
+          </span>
+        </div>`).join("");
+    } catch (e) {
+      modalBody.innerHTML = `<div class="error-state">Couldn't load group members.</div>`;
+    }
+  }
+
+  function closeModal(){
+    modalBackdrop.classList.remove("open");
+    state.pendingMovieId = null;
+  }
+
+  modalBody.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-star]");
+    if (!btn) return;
+    const group = btn.closest(".stars");
+    const userId = group.dataset.user;
+    const val = Number(btn.dataset.star);
+    pendingRatings[userId] = val;
+    [...group.querySelectorAll("button")].forEach(b => b.classList.toggle("filled", Number(b.dataset.star) <= val));
+  });
+
+  document.getElementById("modalCancel").addEventListener("click", closeModal);
+  modalBackdrop.addEventListener("click", (e) => { if (e.target === modalBackdrop) closeModal(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modalBackdrop.classList.contains("open")) closeModal(); });
+
+  document.getElementById("modalSave").addEventListener("click", async () => {
+    if (state.pendingMovieId == null) return;
+    const saveBtn = document.getElementById("modalSave");
+    const originalLabel = saveBtn.textContent;
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving…";
+    try {
+      await markWatchedWithRatings(state.groupId, state.pendingMovieId, pendingRatings);
+      closeModal();
+      showToast("Marked watched — ratings saved.");
+      await Promise.all([renderWatchlist(), renderHistory(), renderDiscover()]);
+    } catch (e) {
+      showToast("Couldn't save ratings — please try again.");
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = originalLabel;
+    }
+  });
+
+  /* =========================================================
+     TOAST
+  ========================================================= */
+  let toastTimer;
+  function showToast(msg){
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 2200);
+  }
+
+  /* =========================================================
+     EVENTS
+  ========================================================= */
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
+
+  document.getElementById("groupSelect").addEventListener("change", async (e) => {
+    state.groupId = Number(e.target.value);
+    state.compareIds = [];
+    document.getElementById("compareCount").textContent = "";
+    await populateUserSelect();
+    await renderAll();
+  });
+  document.getElementById("userSelect").addEventListener("change", (e) => {
+    state.userId = Number(e.target.value);
+  });
+
+  const searchInput = document.getElementById("searchInput");
+  let searchDebounce;
+  searchInput.addEventListener("input", (e) => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => {
+      state.searchQuery = e.target.value;
+      renderSearch();
+    }, 250);
+  });
+  document.getElementById("searchBtn").addEventListener("click", () => {
+    state.searchQuery = searchInput.value;
+    renderSearch();
+  });
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter"){ state.searchQuery = searchInput.value; renderSearch(); }
+  });
+
+  // Delegated clicks for movie-card actions in Discover (search results)
+  document.getElementById("panel-discover").addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const id = Number(btn.dataset.id);
+
+    if (btn.dataset.action === "watchlist"){
+      const originalLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Adding…";
+      const res = await addToWatchlist(state.groupId, id, state.userId);
+      showToast(res.ok ? "Added to group watchlist." : "Couldn't add to the watchlist.");
+      if (res.ok){
+        btn.textContent = "✓ Added";
+        try {
+          const wl = await getWatchlist(state.groupId);
+          document.getElementById("watchlistCount").textContent = ` ${wl.length}`;
+        } catch (e) { /* count refresh is best-effort */ }
+      } else {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+      }
+    }
+
+    if (btn.dataset.action === "compare"){
+      const idx = state.compareIds.indexOf(id);
+      if (idx >= 0){
+        state.compareIds.splice(idx, 1);
+      } else {
+        if (state.compareIds.length >= 4){ showToast("You can compare up to 4 movies at a time."); return; }
+        state.compareIds.push(id);
+      }
+      document.getElementById("compareCount").textContent = state.compareIds.length ? ` ${state.compareIds.length}` : "";
+      renderSearch();
+    }
+  });
+
+  document.getElementById("compareArea").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action='remove-compare']");
+    if (!btn) return;
+    const id = Number(btn.dataset.id);
+    state.compareIds = state.compareIds.filter(x => x !== id);
+    document.getElementById("compareCount").textContent = state.compareIds.length ? ` ${state.compareIds.length}` : "";
+    renderCompare();
+  });
+
+  document.getElementById("watchlistArea").addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const id = Number(btn.dataset.id);
+
+    if (btn.dataset.action === "mark-watched") openRatingModal(id);
+
+    if (btn.dataset.action === "remove-watchlist"){
+      btn.disabled = true;
+      try {
+        await removeFromWatchlist(state.groupId, id);
+        showToast("Removed from watchlist.");
+      } catch (e) {
+        // apiCall already surfaced a toast
+      } finally {
+        await renderWatchlist();
+      }
+    }
+  });
+
+  /* =========================================================
+     INIT
+  ========================================================= */
+  async function populateGroupSelect(){
+    const sel = document.getElementById("groupSelect");
+    sel.innerHTML = `<option>Loading…</option>`;
+    try {
+      const groups = await apiCall("/api/groups");
+      sel.innerHTML = groups.map(g => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join("");
+      state.groupId = groups[0]?.id ?? null;
+      if (state.groupId != null) sel.value = state.groupId;
+    } catch (e) {
+      sel.innerHTML = `<option>Couldn't load groups</option>`;
+    }
+  }
+
+  async function populateUserSelect(){
+    const sel = document.getElementById("userSelect");
+    if (state.groupId == null){ sel.innerHTML = ""; return; }
+    sel.innerHTML = `<option>Loading…</option>`;
+    try {
+      const members = await getGroupMembers(state.groupId);
+      sel.innerHTML = members.map(u => `<option value="${u.id}">${escapeHtml(u.full_name)}</option>`).join("");
+      if (!members.find(u => u.id === state.userId)) state.userId = members[0]?.id ?? null;
+      if (state.userId != null) sel.value = state.userId;
+    } catch (e) {
+      sel.innerHTML = `<option>Couldn't load members</option>`;
+    }
+  }
+
+  async function renderAll(){
+    await Promise.all([renderDiscover(), renderWatchlist(), renderHistory()]);
+    renderCompare();
+  }
+
+  async function init(){
+    await populateGroupSelect();
+    if (state.groupId == null) return; // no groups returned — nothing else to load
+    await populateUserSelect();
+    await renderAll();
+  }
+
+  init();
+})();
+</script>
+
+</body>
+</html>

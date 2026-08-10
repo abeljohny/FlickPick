@@ -1,0 +1,21 @@
+command:
+  - "python"
+  - "flickpick_mcp_server.py"
+
+resources:
+  - name: requirements
+    source:
+      path: ./requirements.txt
+
+env:
+  # Lakebase PostgreSQL connection for watchlist/ratings storage
+  - name: LAKEBASE_SECRET_SCOPE
+    value: "database"
+  - name: LAKEBASE_SECRET_KEY
+    value: "lakebase-url"
+  
+  # TMDB API for movie search and data
+  - name: TMDB_SECRET_SCOPE
+    value: "api-keys"
+  - name: TMDB_SECRET_KEY
+    value: "tmdb-api-key"
