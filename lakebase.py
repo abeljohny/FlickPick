@@ -72,15 +72,15 @@ CREATE TABLE IF NOT EXISTS movies (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Watchlist table (as per templates/index.html schema)
-CREATE TABLE IF NOT EXISTS watchlist (
+-- Watchlist table (named movie_watchlist to match app.py queries)
+CREATE TABLE IF NOT EXISTS movie_watchlist (
     id SERIAL PRIMARY KEY,
     group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
     movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
     added_by_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ DEFAULT now(),
     watched_at TIMESTAMPTZ,  -- NULL = queued, set = watched by group
-    CONSTRAINT uq_watchlist_group_movie UNIQUE (group_id, movie_id)
+    CONSTRAINT uq_movie_watchlist_group_movie UNIQUE (group_id, movie_id)
 );
 
 -- Ratings table (per-user ratings, 1-5)

@@ -71,7 +71,7 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================================================
 -- WATCHLIST
 -- ============================================================================
-INSERT INTO watchlist (id, group_id, movie_id, added_by_user_id, created_at, watched_at) VALUES
+INSERT INTO movie_watchlist (id, group_id, movie_id, added_by_user_id, created_at, watched_at) VALUES
   -- Queued movies (watched_at is NULL)
   (1, 1, 104, 2, '2026-08-01', NULL),  -- Dune, added by Marcus
   (2, 1, 105, 3, '2026-08-03', NULL),  -- The Grand Budapest Hotel, added by Sofia
@@ -82,7 +82,7 @@ INSERT INTO watchlist (id, group_id, movie_id, added_by_user_id, created_at, wat
 ON CONFLICT (group_id, movie_id) DO NOTHING;
 
 -- Reset the watchlist ID sequence
-SELECT setval('watchlist_id_seq', (SELECT MAX(id) FROM watchlist));
+SELECT setval('movie_watchlist_id_seq', (SELECT MAX(id) FROM movie_watchlist));
 
 -- ============================================================================
 -- RATINGS (1-5 scale)

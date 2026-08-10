@@ -7,10 +7,11 @@ from __future__ import annotations
 import logging
 import os
 
+import requests
 from flask import Flask, jsonify, request, render_template
 from databricks.sdk import WorkspaceClient
 
-from lakebase import get_connection, ensure_flickpick_tables
+from lakebase import get_connection, ensure_flickpick_tables, upsert_movie
 
 logger = logging.getLogger(__name__)
 
@@ -67,16 +68,7 @@ def register_flickpick_routes(app: Flask) -> None:
         Proxied TMDB search, annotated server-side with each result's
         watched/disliked status for the given group.
         
-        TODO: Implement TMDB API integration using requests library.
-        Example pattern:
-            import requests
-            tmdb_api_key = _get_tmdb_api_key()
-            resp = requests.get(
-                "https://api.themoviedb.org/3/search/movie",
-                params={"api_key": tmdb_api_key, "query": query},
-                timeout=10
-            )
-            tmdb_data = resp.json()
+        Searches TMDB API, upserts results to local DB, and returns annotated movies.
         """
         query = request.args.get("q", "").strip()
         group_id = request.args.get("group_id", type=int)

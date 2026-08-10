@@ -287,30 +287,6 @@ databricks apps get flickpick-mcp
 
 Full MCP deployment instructions: [MCP_DEPLOYMENT_GUIDE.md](MCP_DEPLOYMENT_GUIDE.md)
 
-### Troubleshooting MCP Server
-
-**Error: "404 Not Found" or "Failed to parse MCP initialize response"**
-
-This means your MCP server URL is missing the `/sse` endpoint. Fix:
-1. Go to **Workspace Settings → AI/ML → MCP Servers**
-2. Edit your FlickPick MCP server entry
-3. Update URL to: `https://<workspace>.cloud.databricks.com/apps/flickpick-mcp/sse`
-4. Make sure it ends with `/sse`
-
-**Verify the endpoint:**
-```bash
-# Should return SSE stream headers
-curl -H "Accept: text/event-stream" \
-  https://<workspace>.cloud.databricks.com/apps/flickpick-mcp/sse
-
-# Check app logs
-databricks apps logs flickpick-mcp --tail 50
-```
-
-Expected in logs: `INFO: Started server on 0.0.0.0:8000 with SSE transport`
-
-See [MCP_ERROR_FIX.md](MCP_ERROR_FIX.md) for technical details.
-
 ## ✨ Key Features Explained
 
 ### 1. Smart Group Filtering
@@ -372,29 +348,6 @@ python app.py
 # Visit http://localhost:8000
 ```
 
-## 📝 Recent Updates
-
-### Version 2.1 (Latest) — MCP Server SSE Transport Fix
-- ✅ **Fixed MCP server 404 error** — Changed transport from HTTP to SSE (Server-Sent Events)
-- ✅ **Updated MCP endpoint** — Now properly available at `/sse` path
-- ✅ **Updated deployment documentation** — All guides now include correct `/sse` URL
-- ✅ **Git repository established** — Full codebase pushed to GitHub
-- ✅ **Documentation overhaul** — Comprehensive README and deployment guides
-
-**Technical Details**: The MCP server was returning 404 errors because it used generic HTTP transport instead of SSE. Databricks MCP clients require SSE transport with the endpoint at `/sse`. This has been fixed in `mcp_server/flickpick_mcp_server.py`.
-
-### Version 2.0 — Enhanced Movie Schema
-- ✅ Added 6 TMDB fields: original_title, original_language, country, genre_id, popularity, duration
-- ✅ Populated 8 movies with real data including native-script titles
-- ✅ Updated compare tab to show all new fields
-- ✅ Fixed watchlist POST endpoint (removed invalid RETURNING clause)
-- ✅ Added ON CONFLICT handling for duplicate prevention
-
-### Version 1.0 — MCP Server Integration
-- ✅ Created FastMCP server with 6 movie tools
-- ✅ Deployed as separate Databricks App
-- ✅ AI/ML Playground integration with natural language queries
-
 ## 📚 Documentation
 
 - **[README.md](README.md)** — This file (complete project overview)
@@ -426,8 +379,7 @@ FlickPick is built for group movie nights! Contributions welcome:
 
 ## 📝 License
 
-MIT License - feel free to use for your movie nights! 🎬🍿er_embeddings_job.yml
-# and change pause_status from PAUSED to UNPAUSED, then redeploy
+MIT License - feel free to use for your movie nights! 🎬🍿er_embeddings_job.yml and change pause_status from PAUSED to UNPAUSED, then redeploy
 ```
 
 ## Environment Variables
