@@ -162,7 +162,9 @@ cd mcp_server/
 databricks apps create flickpick-mcp --source-code-path .
 ```
 
-Then register the MCP server URL in **Workspace Settings → AI/ML → MCP Servers**.
+Then register the MCP server in **Workspace Settings → AI/ML → MCP Servers**:
+- **URL**: `https://<workspace>.cloud.databricks.com/apps/flickpick-mcp/sse`
+- **Important**: The URL must end with `/sse` (SSE transport endpoint)
 
 See [MCP_DEPLOYMENT_GUIDE.md](MCP_DEPLOYMENT_GUIDE.md) for full instructions.
 
@@ -209,7 +211,7 @@ See [MCP_DEPLOYMENT_GUIDE.md](MCP_DEPLOYMENT_GUIDE.md) for full instructions.
 ├── templates/
 │   └── index.html                  # FlickPick web UI (search, watchlist, ratings, compare)
 ├── mcp_server/                     # MCP server for Databricks AI/ML Playground
-│   ├── flickpick_mcp_server.py     # FastMCP server with 6 movie tools
+│   ├── flickpick_mcp_server.py     # FastMCP server with SSE transport (6 movie tools)
 │   ├── flickpick_broker.py         # Backend functions (TMDB + Lakebase)
 │   ├── app.yaml                    # MCP server Databricks App config
 │   └── requirements.txt            # MCP server dependencies
@@ -274,10 +276,40 @@ databricks apps create flickpick-mcp --source-code-path .
 # Get the app URL
 databricks apps get flickpick-mcp
 
-# Register in Workspace Settings → AI/ML → MCP Servers
 ```
 
+**Register in Workspace Settings → AI/ML → MCP Servers**:
+- **Name**: FlickPick Movie Tools
+- **URL**: `https://<workspace>.cloud.databricks.com/apps/flickpick-mcp/sse`
+- **Description**: Movie recommendations, comparisons, and watchlist tools
+
+⚠️ **Critical**: The URL must end with `/sse` — this is the SSE transport endpoint required for the MCP protocol.
+
 Full MCP deployment instructions: [MCP_DEPLOYMENT_GUIDE.md](MCP_DEPLOYMENT_GUIDE.md)
+
+### Troubleshooting MCP Server
+
+**Error: "404 Not Found" or "Failed to parse MCP initialize response"**
+
+This means your MCP server URL is missing the `/sse` endpoint. Fix:
+1. Go to **Workspace Settings → AI/ML → MCP Servers**
+2. Edit your FlickPick MCP server entry
+3. Update URL to: `https://<workspace>.cloud.databricks.com/apps/flickpick-mcp/sse`
+4. Make sure it ends with `/sse`
+
+**Verify the endpoint:**
+```bash
+# Should return SSE stream headers
+curl -H "Accept: text/event-stream" \
+  https://<workspace>.cloud.databricks.com/apps/flickpick-mcp/sse
+
+# Check app logs
+databricks apps logs flickpick-mcp --tail 50
+```
+
+Expected in logs: `INFO: Started server on 0.0.0.0:8000 with SSE transport`
+
+See [MCP_ERROR_FIX.md](MCP_ERROR_FIX.md) for technical details.
 
 ## ✨ Key Features Explained
 
@@ -342,24 +374,39 @@ python app.py
 
 ## 📝 Recent Updates
 
-### Enhanced Movie Schema (v2.0)
+### Version 2.1 (Latest) — MCP Server SSE Transport Fix
+- ✅ **Fixed MCP server 404 error** — Changed transport from HTTP to SSE (Server-Sent Events)
+- ✅ **Updated MCP endpoint** — Now properly available at `/sse` path
+- ✅ **Updated deployment documentation** — All guides now include correct `/sse` URL
+- ✅ **Git repository established** — Full codebase pushed to GitHub
+- ✅ **Documentation overhaul** — Comprehensive README and deployment guides
+
+**Technical Details**: The MCP server was returning 404 errors because it used generic HTTP transport instead of SSE. Databricks MCP clients require SSE transport with the endpoint at `/sse`. This has been fixed in `mcp_server/flickpick_mcp_server.py`.
+
+### Version 2.0 — Enhanced Movie Schema
 - ✅ Added 6 TMDB fields: original_title, original_language, country, genre_id, popularity, duration
 - ✅ Populated 8 movies with real data including native-script titles
 - ✅ Updated compare tab to show all new fields
 - ✅ Fixed watchlist POST endpoint (removed invalid RETURNING clause)
 - ✅ Added ON CONFLICT handling for duplicate prevention
 
-### MCP Server Integration
+### Version 1.0 — MCP Server Integration
 - ✅ Created FastMCP server with 6 movie tools
 - ✅ Deployed as separate Databricks App
-- ✅ Ready for AI/ML Playground integration
+- ✅ AI/ML Playground integration with natural language queries
 
 ## 📚 Documentation
 
-- [QUICKSTART.md](QUICKSTART.md) — Fast setup guide
-- [MCP_DEPLOYMENT_GUIDE.md](MCP_DEPLOYMENT_GUIDE.md) — MCP server deployment
-- [conversation_history.pdf](conversation_history.pdf) — AI assistant examples
-- [screenshots/](screenshots/) — Application UI screenshots
+- **[README.md](README.md)** — This file (complete project overview)
+- **[MCP_DEPLOYMENT_GUIDE.md](MCP_DEPLOYMENT_GUIDE.md)** — MCP server deployment with SSE transport
+- **[MCP_ERROR_FIX.md](MCP_ERROR_FIX.md)** — Technical details on the 404/SSE transport fix
+- **[PUSH_SUCCESS.md](PUSH_SUCCESS.md)** — Git repository setup and deployment summary
+- **[conversation_history.pdf](conversation_history.pdf)** — AI assistant conversation examples
+- **[screenshots/](screenshots/)** — Application UI screenshots
+
+### Additional Resources
+- **GitHub Repository**: https://github.com/abeljohny/FlickPick
+- **Latest Commit**: 54747d1 (Initial commit with all features)
 
 ## 👥 Sample Data
 
