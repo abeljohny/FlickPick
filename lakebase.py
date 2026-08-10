@@ -62,13 +62,19 @@ CREATE TABLE IF NOT EXISTS group_members (
     UNIQUE (group_id, user_id)
 );
 
--- Movies table
+-- Movies table (extended schema for TMDB integration)
 CREATE TABLE IF NOT EXISTS movies (
     id INTEGER PRIMARY KEY,  -- TMDB movie ID
     title TEXT NOT NULL,
     poster_path TEXT,
     release_date DATE,
     overview TEXT,
+    movie_genre_id INTEGER,  -- Primary genre ID from TMDB
+    original_language TEXT,
+    original_title TEXT,
+    country TEXT,
+    popularity NUMERIC,
+    duration_minutes INTEGER,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -106,8 +112,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_group_members_group_id ON group_members(group_id);
 CREATE INDEX IF NOT EXISTS idx_group_members_user_id ON group_members(user_id);
-CREATE INDEX IF NOT EXISTS idx_watchlist_group_id ON watchlist(group_id);
-CREATE INDEX IF NOT EXISTS idx_watchlist_movie_id ON watchlist(movie_id);
+CREATE INDEX IF NOT EXISTS idx_movie_watchlist_group_id ON movie_watchlist(group_id);
+CREATE INDEX IF NOT EXISTS idx_movie_watchlist_movie_id ON movie_watchlist(movie_id);
 CREATE INDEX IF NOT EXISTS idx_ratings_movie_id ON ratings(movie_id);
 CREATE INDEX IF NOT EXISTS idx_ratings_user_id ON ratings(user_id);
 CREATE INDEX IF NOT EXISTS idx_recommendations_user_id ON recommendations(user_id);

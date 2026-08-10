@@ -1,0 +1,51 @@
+# Databricks job configuration for FlickPick movie embeddings ingestion
+# This job runs the ingest_movie_embeddings.py script on a schedule to
+# generate and store semantic embeddings for movie recommendations.
+
+resources:
+  jobs:
+    ingest_movie_embeddings_job:
+      name: "[${bundle.target}] FlickPick - Ingest Movie Embeddings"
+      
+      tasks:
+        - task_key: ingest_embeddings
+          description: "Generate and store movie embeddings for semantic search"
+          
+          python_file:
+            source: ../ingest_movie_embeddings.py
+          
+          libraries:
+            - pypi:
+                package: sentence-transformers>=2.2.0
+            - pypi:
+                package: psycopg2-binary>=2.9.0
+            - pypi:
+                package: databricks-sdk>=0.20.0
+          
+          new_cluster:
+            num_workers: 0  # Single-node cluster for embedding generation
+            spark_version: "14.3.x-scala2.12"
+            node_type_id: "i3.xlarge"  # CPU instance sufficient for sentence-transformers
+            spark_conf:
+              spark.databricks.cluster.profile: "singleNode"
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: "SingleNode"
+      
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"  # Daily at 2 AM UTC
+        timezone_id: "UTC"
+        pause_status: UNPAUSED
+      
+      max_concurrent_runs: 1
+      
+      email_notifications:
+        on_failure:
+          - ${bundle.user_email}
+        on_success:
+          - ${bundle.user_email}
+      
+      tags:
+        app: flickpick
+        component: embeddings
+        environment: ${bundle.target}

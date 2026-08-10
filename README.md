@@ -222,7 +222,6 @@ See [MCP_DEPLOYMENT_GUIDE.md](MCP_DEPLOYMENT_GUIDE.md) for full instructions.
 │   ├── watch-history.png
 │   ├── watchlist-ratings.png
 │   └── compare-tab.png
-└── conversation_history.pdf       # 🤖 MCP server AI conversation examples
 ```
 
 ## 📸 Screenshots & Demo

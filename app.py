@@ -138,6 +138,123 @@ def register_flickpick_routes(app: Flask) -> None:
 
         return jsonify({"results": results})
 
+    @app.route("/api/search/semantic", methods=["GET"])
+    def semantic_search():
+        """
+        GET /api/search/semantic?q=<query>&group_id=<id>&limit=<n>
+        Semantic search using movie embeddings (cosine similarity).
+        """
+        query = request.args.get("q", "").strip()
+        group_id = request.args.get("group_id", type=int)
+        limit = request.args.get("limit", type=int, default=10)
+
+        if not query:
+            return jsonify({"error": "query parameter 'q' is required"}), 400
+        if not group_id:
+            return jsonify({"error": "query parameter 'group_id' is required"}), 400
+
+        # Generate query embedding
+        try:
+            from sentence_transformers import SentenceTransformer
+            # Use same model as ingest pipeline
+            model = SentenceTransformer('all-MiniLM-L6-v2')
+            query_embedding = model.encode(query, normalize_embeddings=True).tolist()
+        except Exception as e:
+            logger.exception("Failed to generate query embedding")
+            return jsonify({"error": "Embedding generation failed"}), 500
+
+        # Search using cosine similarity (dot product on normalized vectors)
+        # PostgreSQL doesn't have built-in vector operations, so we compute in Python
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Get all embeddings (or a reasonable subset)
+                cur.execute(
+                    """
+                    SELECT e.movie_id, e.embedding, m.title, m.poster_path, 
+                           m.release_date, m.overview, m.popularity
+                    FROM movie_embeddings e
+                    JOIN movies m ON e.movie_id = m.id
+                    LIMIT 1000
+                    """
+                )
+                embeddings_data = cur.fetchall()
+
+        # Compute cosine similarity in Python (embeddings are already normalized)
+        import numpy as np
+        query_vec = np.array(query_embedding)
+        
+        results_with_scores = []
+        for row in embeddings_data:
+            movie_embedding = row["embedding"]
+            if movie_embedding:
+                # Dot product of normalized vectors = cosine similarity
+                similarity = float(np.dot(query_vec, movie_embedding))
+                results_with_scores.append({
+                    "id": row["movie_id"],
+                    "title": row["title"],
+                    "poster_path": row["poster_path"],
+                    "release_date": str(row["release_date"]) if row["release_date"] else None,
+                    "overview": row["overview"],
+                    "popularity": float(row["popularity"]) if row["popularity"] else 0,
+                    "similarity_score": similarity
+                })
+        
+        # Sort by similarity descending
+        results_with_scores.sort(key=lambda x: x["similarity_score"], reverse=True)
+        
+        # Get top results
+        top_results = results_with_scores[:limit * 2]  # Get extra for filtering
+        movie_ids = [r["id"] for r in top_results]
+
+        # Filter out watched/disliked movies
+        watched_ids = set()
+        disliked_ids = set()
+        
+        if movie_ids:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Check watchlist for watched movies
+                    cur.execute(
+                        """
+                        SELECT DISTINCT movie_id
+                        FROM movie_watchlist
+                        WHERE group_id = %s AND movie_id = ANY(%s) AND watched_at IS NOT NULL
+                        """,
+                        (group_id, movie_ids)
+                    )
+                    watched_ids = {row["movie_id"] for row in cur.fetchall()}
+
+                    # Check average ratings for disliked movies (avg rating <= 2)
+                    cur.execute(
+                        """
+                        SELECT r.movie_id
+                        FROM ratings r
+                        JOIN group_members gm ON r.user_id = gm.user_id
+                        WHERE gm.group_id = %s AND r.movie_id = ANY(%s)
+                        GROUP BY r.movie_id
+                        HAVING AVG(r.rating) <= 2
+                        """,
+                        (group_id, movie_ids)
+                    )
+                    disliked_ids = {row["movie_id"] for row in cur.fetchall()}
+
+        # Filter and annotate results
+        filtered_results = []
+        for result in top_results:
+            movie_id = result["id"]
+            if movie_id not in watched_ids and movie_id not in disliked_ids:
+                result["watched"] = False
+                result["disliked"] = False
+                filtered_results.append(result)
+                if len(filtered_results) >= limit:
+                    break
+
+        return jsonify({
+            "results": filtered_results,
+            "search_type": "semantic",
+            "query": query
+        })
+
     @app.route("/api/groups/<int:group_id>/recommendations", methods=["GET"])
     def get_group_recommendations(group_id):
         """

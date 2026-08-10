@@ -14,12 +14,16 @@ Functions:
 """
 
 import os
+import sys
+import time
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 import requests
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from databricks.sdk import WorkspaceClient
+
+# Add parent directory to path to import lakebase
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lakebase import get_connection
 
 # Initialize Databricks client
 w = WorkspaceClient()
@@ -28,27 +32,6 @@ w = WorkspaceClient()
 TMDB_API_KEY = w.secrets.get_secret(scope="api-keys", key="tmdb-api-key")
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
-
-# Lakebase connection using OAuth (matching lakebase.py approach)
-import base64
-LAKEBASE_SCOPE = os.getenv("LAKEBASE_SECRET_SCOPE", "database")
-LAKEBASE_KEY = os.getenv("LAKEBASE_SECRET_KEY", "lakebase-url")
-
-def _get_lakebase_url():
-    """Fetch and decode the Lakebase connection URL from secrets."""
-    secret = w.secrets.get_secret(scope=LAKEBASE_SCOPE, key=LAKEBASE_KEY)
-    return base64.b64decode(secret.value).decode("utf-8")
-
-
-def _get_db_connection():
-    """Get a connection to the Lakebase PostgreSQL database."""
-    return psycopg2.connect(
-        host=LAKEBASE_HOST,
-        database=LAKEBASE_DATABASE,
-        user=LAKEBASE_USER,
-        password=LAKEBASE_PASSWORD,
-        cursor_factory=RealDictCursor
-    )
 
 
 def _fetch_movie_details(movie_id: int) -> Dict[str, Any]:
@@ -90,46 +73,42 @@ def _fetch_movie_details(movie_id: int) -> Dict[str, Any]:
     }
 
 
-def _get_excluded_movie_ids(group_id: str) -> set:
+def _get_excluded_movie_ids(group_id: int) -> set:
     """
     Get movie IDs that should be excluded for a group (watched or disliked).
     
     Args:
-        group_id: Unique identifier for the group
+        group_id: Unique identifier for the group (integer)
         
     Returns:
         Set of movie IDs to exclude from recommendations
     """
-    conn = _get_db_connection()
-    try:
-        cursor = conn.cursor()
-        
-        # Get movies watched by the group or with low average ratings (< 3)
-        cursor.execute(
-            """
-            SELECT DISTINCT w.movie_id
-            FROM movie_watchlist w
-            WHERE w.group_id = %s AND w.watched_at IS NOT NULL
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            # Get movies watched by the group or with low average ratings (< 3)
+            cursor.execute(
+                """
+                SELECT DISTINCT w.movie_id
+                FROM movie_watchlist w
+                WHERE w.group_id = %s AND w.watched_at IS NOT NULL
+                
+                UNION
+                
+                SELECT DISTINCT r.movie_id
+                FROM ratings r
+                JOIN group_members gm ON r.user_id = gm.user_id
+                WHERE gm.group_id = %s
+                GROUP BY r.movie_id
+                HAVING AVG(r.rating) < 3
+                """,
+                (group_id, group_id)
+            )
             
-            UNION
-            
-            SELECT DISTINCT r.movie_id
-            FROM ratings r
-            JOIN group_members gm ON r.user_id = gm.user_id
-            WHERE gm.group_id = %s
-            GROUP BY r.movie_id
-            HAVING AVG(r.rating) < 3
-            """,
-            (group_id, group_id)
-        )
-        
-        excluded_ids = {row['movie_id'] for row in cursor.fetchall()}
-        return excluded_ids
-    finally:
-        conn.close()
+            excluded_ids = {row['movie_id'] for row in cursor.fetchall()}
+            return excluded_ids
 
 
-def search_movies_with_recommendations(query: str, group_id: str, limit: int = 10) -> Dict[str, Any]:
+def search_movies_with_recommendations(query: str, group_id: int, limit: int = 10) -> Dict[str, Any]:
     """
     Search for movies and provide recommendations, excluding watched/disliked movies.
     
@@ -272,45 +251,41 @@ def add_to_watchlist(movie_id: int, group_id: int, added_by_user_id: int) -> Dic
     # Fetch movie details first to validate and get title
     movie = _fetch_movie_details(movie_id)
     
-    conn = _get_db_connection()
-    try:
-        cursor = conn.cursor()
-        
-        # First ensure the movie exists in our database
-        cursor.execute(
-            """
-            INSERT INTO movies (id, title, poster_path, release_date, overview)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO NOTHING
-            """,
-            (movie_id, movie["title"], movie.get("poster_path"), 
-             movie.get("release_date"), movie.get("overview"))
-        )
-        
-        # Insert into watchlist with correct columns
-        cursor.execute(
-            """
-            INSERT INTO watchlist (group_id, movie_id, added_by_user_id, created_at)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (group_id, movie_id) DO NOTHING
-            RETURNING id
-            """,
-            (group_id, movie_id, added_by_user_id, datetime.now())
-        )
-        
-        result = cursor.fetchone()
-        conn.commit()
-        
-        return {
-            "success": True,
-            "movie_id": movie_id,
-            "movie_title": movie["title"],
-            "group_id": group_id,
-            "added_by_user_id": added_by_user_id,
-            "already_existed": result is None
-        }
-    finally:
-        conn.close()
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            # First ensure the movie exists in our database
+            cursor.execute(
+                """
+                INSERT INTO movies (id, title, poster_path, release_date, overview)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (movie_id, movie["title"], movie.get("poster_path"), 
+                 movie.get("release_date"), movie.get("overview"))
+            )
+            
+            # Insert into movie_watchlist (correct table name)
+            cursor.execute(
+                """
+                INSERT INTO movie_watchlist (group_id, movie_id, added_by_user_id, created_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (group_id, movie_id) DO NOTHING
+                RETURNING id
+                """,
+                (group_id, movie_id, added_by_user_id)
+            )
+            
+            result = cursor.fetchone()
+            conn.commit()
+            
+            return {
+                "success": True,
+                "movie_id": movie_id,
+                "movie_title": movie["title"],
+                "group_id": group_id,
+                "added_by_user_id": added_by_user_id,
+                "already_existed": result is None
+            }
 
 
 def record_rating(movie_id: int, user_id: int, rating: int, group_id: Optional[int] = None) -> Dict[str, Any]:
@@ -329,52 +304,48 @@ def record_rating(movie_id: int, user_id: int, rating: int, group_id: Optional[i
     if not (1 <= rating <= 5):
         raise ValueError("Rating must be between 1 and 5")
     
-    conn = _get_db_connection()
-    try:
-        cursor = conn.cursor()
-        
-        # Insert or update rating (per-user, not per-group)
-        cursor.execute(
-            """
-            INSERT INTO ratings (movie_id, user_id, rating, created_at)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (movie_id, user_id) 
-            DO UPDATE SET rating = EXCLUDED.rating, created_at = EXCLUDED.created_at
-            RETURNING id
-            """,
-            (movie_id, user_id, rating, datetime.now())
-        )
-        
-        conn.commit()
-        
-        result = {
-            "success": True,
-            "movie_id": movie_id,
-            "user_id": user_id,
-            "rating": rating
-        }
-        
-        # If group_id provided, calculate group average from all group members
-        if group_id is not None:
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            # Insert or update rating (per-user, not per-group)
             cursor.execute(
                 """
-                SELECT AVG(r.rating) as avg_rating, COUNT(*) as rating_count
-                FROM ratings r
-                JOIN group_members gm ON r.user_id = gm.user_id
-                WHERE r.movie_id = %s AND gm.group_id = %s
+                INSERT INTO ratings (movie_id, user_id, rating, created_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (movie_id, user_id) 
+                DO UPDATE SET rating = EXCLUDED.rating, created_at = now()
+                RETURNING id
                 """,
-                (movie_id, group_id)
+                (movie_id, user_id, rating)
             )
             
-            stats = cursor.fetchone()
-            if stats and stats["rating_count"] > 0:
-                result["group_id"] = group_id
-                result["group_average"] = round(float(stats["avg_rating"]), 2)
-                result["total_group_ratings"] = stats["rating_count"]
-        
-        return result
-    finally:
-        conn.close()
+            conn.commit()
+            
+            result = {
+                "success": True,
+                "movie_id": movie_id,
+                "user_id": user_id,
+                "rating": rating
+            }
+            
+            # If group_id provided, calculate group average from all group members
+            if group_id is not None:
+                cursor.execute(
+                    """
+                    SELECT AVG(r.rating) as avg_rating, COUNT(*) as rating_count
+                    FROM ratings r
+                    JOIN group_members gm ON r.user_id = gm.user_id
+                    WHERE r.movie_id = %s AND gm.group_id = %s
+                    """,
+                    (movie_id, group_id)
+                )
+                
+                stats = cursor.fetchone()
+                if stats and stats["rating_count"] > 0:
+                    result["group_id"] = group_id
+                    result["group_average"] = round(float(stats["avg_rating"]), 2)
+                    result["total_group_ratings"] = stats["rating_count"]
+            
+            return result
 
 
 def get_watchlist(group_id: int) -> Dict[str, Any]:
@@ -387,37 +358,33 @@ def get_watchlist(group_id: int) -> Dict[str, Any]:
     Returns:
         Dict with watchlist movies including title and metadata
     """
-    conn = _get_db_connection()
-    try:
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            """
-            SELECT 
-                w.movie_id,
-                m.title as movie_title,
-                w.added_by_user_id,
-                u.name as added_by_name,
-                w.created_at as added_date,
-                w.watched_at
-            FROM watchlist w
-            JOIN movies m ON w.movie_id = m.id
-            JOIN users u ON w.added_by_user_id = u.id
-            WHERE w.group_id = %s AND w.watched_at IS NULL
-            ORDER BY w.created_at DESC
-            """,
-            (group_id,)
-        )
-        
-        watchlist = cursor.fetchall()
-        
-        return {
-            "group_id": group_id,
-            "count": len(watchlist),
-            "movies": [dict(row) for row in watchlist]
-        }
-    finally:
-        conn.close()
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 
+                    w.movie_id,
+                    m.title as movie_title,
+                    w.added_by_user_id,
+                    u.name as added_by_name,
+                    w.created_at as added_date,
+                    w.watched_at
+                FROM movie_watchlist w
+                JOIN movies m ON w.movie_id = m.id
+                JOIN users u ON w.added_by_user_id = u.id
+                WHERE w.group_id = %s AND w.watched_at IS NULL
+                ORDER BY w.created_at DESC
+                """,
+                (group_id,)
+            )
+            
+            watchlist = cursor.fetchall()
+            
+            return {
+                "group_id": group_id,
+                "count": len(watchlist),
+                "movies": [dict(row) for row in watchlist]
+            }
 
 
 def get_watched_movies(group_id: str) -> Dict[str, Any]:
