@@ -43,7 +43,7 @@ mcp = FastMCP("flickpick-service")
 
 
 @mcp.tool
-def search_and_recommend(query: str, group_id: str, limit: int = 10) -> dict:
+def search_and_recommend(query: str, group_id: int, limit: int = 10) -> dict:
     """
     Search for movies and get personalized recommendations for a group.
     
@@ -52,7 +52,7 @@ def search_and_recommend(query: str, group_id: str, limit: int = 10) -> dict:
 
     Args:
         query: Search query (movie title, genre, keywords, e.g. "sci-fi thriller" or "Inception").
-        group_id: Unique identifier for your group (e.g. "friends", "family").
+        group_id: Numeric group ID from the database.
         limit: Maximum number of recommendations to return (default: 10).
 
     Returns:
