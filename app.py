@@ -13,6 +13,14 @@ from databricks.sdk import WorkspaceClient
 
 from lakebase import get_connection, ensure_flickpick_tables, upsert_movie
 
+try:
+    from sentence_transformers import SentenceTransformer
+    import numpy as np
+    _embedding_model = None  # Lazy load
+except ImportError:
+    SentenceTransformer = None
+    np = None
+
 logger = logging.getLogger(__name__)
 
 _w = WorkspaceClient()
@@ -137,123 +145,6 @@ def register_flickpick_routes(app: Flask) -> None:
             result["disliked"] = movie_id in disliked_ids
 
         return jsonify({"results": results})
-
-    @app.route("/api/search/semantic", methods=["GET"])
-    def semantic_search():
-        """
-        GET /api/search/semantic?q=<query>&group_id=<id>&limit=<n>
-        Semantic search using movie embeddings (cosine similarity).
-        """
-        query = request.args.get("q", "").strip()
-        group_id = request.args.get("group_id", type=int)
-        limit = request.args.get("limit", type=int, default=10)
-
-        if not query:
-            return jsonify({"error": "query parameter 'q' is required"}), 400
-        if not group_id:
-            return jsonify({"error": "query parameter 'group_id' is required"}), 400
-
-        # Generate query embedding
-        try:
-            from sentence_transformers import SentenceTransformer
-            # Use same model as ingest pipeline
-            model = SentenceTransformer('all-MiniLM-L6-v2')
-            query_embedding = model.encode(query, normalize_embeddings=True).tolist()
-        except Exception as e:
-            logger.exception("Failed to generate query embedding")
-            return jsonify({"error": "Embedding generation failed"}), 500
-
-        # Search using cosine similarity (dot product on normalized vectors)
-        # PostgreSQL doesn't have built-in vector operations, so we compute in Python
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                # Get all embeddings (or a reasonable subset)
-                cur.execute(
-                    """
-                    SELECT e.movie_id, e.embedding, m.title, m.poster_path, 
-                           m.release_date, m.overview, m.popularity
-                    FROM movie_embeddings e
-                    JOIN movies m ON e.movie_id = m.id
-                    LIMIT 1000
-                    """
-                )
-                embeddings_data = cur.fetchall()
-
-        # Compute cosine similarity in Python (embeddings are already normalized)
-        import numpy as np
-        query_vec = np.array(query_embedding)
-        
-        results_with_scores = []
-        for row in embeddings_data:
-            movie_embedding = row["embedding"]
-            if movie_embedding:
-                # Dot product of normalized vectors = cosine similarity
-                similarity = float(np.dot(query_vec, movie_embedding))
-                results_with_scores.append({
-                    "id": row["movie_id"],
-                    "title": row["title"],
-                    "poster_path": row["poster_path"],
-                    "release_date": str(row["release_date"]) if row["release_date"] else None,
-                    "overview": row["overview"],
-                    "popularity": float(row["popularity"]) if row["popularity"] else 0,
-                    "similarity_score": similarity
-                })
-        
-        # Sort by similarity descending
-        results_with_scores.sort(key=lambda x: x["similarity_score"], reverse=True)
-        
-        # Get top results
-        top_results = results_with_scores[:limit * 2]  # Get extra for filtering
-        movie_ids = [r["id"] for r in top_results]
-
-        # Filter out watched/disliked movies
-        watched_ids = set()
-        disliked_ids = set()
-        
-        if movie_ids:
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    # Check watchlist for watched movies
-                    cur.execute(
-                        """
-                        SELECT DISTINCT movie_id
-                        FROM movie_watchlist
-                        WHERE group_id = %s AND movie_id = ANY(%s) AND watched_at IS NOT NULL
-                        """,
-                        (group_id, movie_ids)
-                    )
-                    watched_ids = {row["movie_id"] for row in cur.fetchall()}
-
-                    # Check average ratings for disliked movies (avg rating <= 2)
-                    cur.execute(
-                        """
-                        SELECT r.movie_id
-                        FROM ratings r
-                        JOIN group_members gm ON r.user_id = gm.user_id
-                        WHERE gm.group_id = %s AND r.movie_id = ANY(%s)
-                        GROUP BY r.movie_id
-                        HAVING AVG(r.rating) <= 2
-                        """,
-                        (group_id, movie_ids)
-                    )
-                    disliked_ids = {row["movie_id"] for row in cur.fetchall()}
-
-        # Filter and annotate results
-        filtered_results = []
-        for result in top_results:
-            movie_id = result["id"]
-            if movie_id not in watched_ids and movie_id not in disliked_ids:
-                result["watched"] = False
-                result["disliked"] = False
-                filtered_results.append(result)
-                if len(filtered_results) >= limit:
-                    break
-
-        return jsonify({
-            "results": filtered_results,
-            "search_type": "semantic",
-            "query": query
-        })
 
     @app.route("/api/groups/<int:group_id>/recommendations", methods=["GET"])
     def get_group_recommendations(group_id):
@@ -431,6 +322,95 @@ def register_flickpick_routes(app: Flask) -> None:
                 )
                 history = cur.fetchall()
         return jsonify(history)
+
+    @app.route("/api/search/semantic", methods=["GET"])
+    def semantic_search():
+        """
+        GET /api/search/semantic?q=<query>&group_id=<id>&limit=<limit>
+        Semantic search using movie embeddings. Returns top-k similar movies
+        based on cosine similarity, excluding watched/disliked movies.
+        """
+        if SentenceTransformer is None or np is None:
+            return jsonify({"error": "sentence-transformers not installed"}), 501
+        
+        query = request.args.get("q", "").strip()
+        group_id = request.args.get("group_id", type=int)
+        limit = request.args.get("limit", 20, type=int)
+        
+        if not query:
+            return jsonify({"error": "query parameter 'q' is required"}), 400
+        
+        # Lazy load the embedding model
+        global _embedding_model
+        if _embedding_model is None:
+            _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        
+        # Embed the query
+        query_embedding = _embedding_model.encode([query], normalize_embeddings=True)[0].tolist()
+        
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Get excluded movie IDs (watched or disliked) if group_id provided
+                excluded_ids = []
+                if group_id:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT w.movie_id
+                        FROM movie_watchlist w
+                        WHERE w.group_id = %s AND w.watched_at IS NOT NULL
+                        UNION
+                        SELECT DISTINCT r.movie_id
+                        FROM ratings r
+                        JOIN group_members gm ON r.user_id = gm.user_id
+                        WHERE gm.group_id = %s
+                        GROUP BY r.movie_id
+                        HAVING AVG(r.rating) <= 2
+                        """,
+                        (group_id, group_id),
+                    )
+                    excluded_ids = [row["movie_id"] for row in cur.fetchall()]
+                
+                # Compute cosine similarity using PostgreSQL array operations
+                # Cosine similarity = dot product (since vectors are normalized)
+                excluded_clause = "AND me.movie_id != ALL(%s)" if excluded_ids else ""
+                
+                cur.execute(
+                    f"""
+                    WITH similarities AS (
+                        SELECT 
+                            me.movie_id,
+                            (
+                                SELECT SUM(e1 * e2)
+                                FROM unnest(me.embedding_vector) WITH ORDINALITY AS t1(e1, i)
+                                JOIN unnest(%s::float8[]) WITH ORDINALITY AS t2(e2, i) ON t1.i = t2.i
+                            ) as similarity
+                        FROM movie_embeddings me
+                        WHERE me.embedding_model = 'sentence-transformers/all-MiniLM-L6-v2'
+                        {excluded_clause}
+                        GROUP BY me.movie_id
+                    )
+                    SELECT 
+                        m.id,
+                        m.title,
+                        m.poster_path,
+                        m.release_date,
+                        m.overview,
+                        m.popularity,
+                        s.similarity
+                    FROM similarities s
+                    JOIN movies m ON s.movie_id = m.id
+                    ORDER BY s.similarity DESC
+                    LIMIT %s
+                    """,
+                    (query_embedding, excluded_ids, limit) if excluded_ids else (query_embedding, limit),
+                )
+                results = cur.fetchall()
+        
+        return jsonify({
+            "query": query,
+            "results": results,
+            "count": len(results)
+        })
 
 
 if __name__ == "__main__":

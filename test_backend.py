@@ -30,7 +30,7 @@ def test_connection():
 def test_tables():
     """Check if all required tables exist and have data."""
     print("\nChecking tables...")
-    tables = ['users', 'groups', 'group_members', 'movies', 'watchlist', 'ratings', 'recommendations']
+    tables = ['users', 'groups', 'group_members', 'movies', 'movie_watchlist', 'ratings', 'recommendations']
     
     try:
         with get_connection() as conn:
@@ -77,7 +77,7 @@ def test_watchlist_query():
                         m.title,
                         m.poster_path,
                         w.watched_at
-                    FROM watchlist w
+                    FROM movie_watchlist w
                     JOIN movies m ON w.movie_id = m.id
                     JOIN users u ON w.added_by_user_id = u.id
                     WHERE w.group_id = 1

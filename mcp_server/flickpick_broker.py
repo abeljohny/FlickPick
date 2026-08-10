@@ -387,43 +387,47 @@ def get_watchlist(group_id: int) -> Dict[str, Any]:
             }
 
 
-def get_watched_movies(group_id: str) -> Dict[str, Any]:
+def get_watched_movies(group_id: int) -> Dict[str, Any]:
     """
     Get movies already watched by the group with their ratings.
     
     Args:
-        group_id: Unique identifier for the group
+        group_id: Unique identifier for the group (integer)
         
     Returns:
         Dict with watched movies and their group ratings
     """
-    conn = _get_db_connection()
-    try:
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            """
-            SELECT movie_id, AVG(rating) as avg_rating, COUNT(*) as rating_count, 
-                   MAX(watched_date) as last_watched
-            FROM ratings
-            WHERE group_id = %s AND watched = TRUE
-            GROUP BY movie_id
-            ORDER BY last_watched DESC
-            """,
-            (group_id,)
-        )
-        
-        watched = cursor.fetchall()
-        
-        return {
-            "group_id": group_id,
-            "count": len(watched),
-            "movies": [{
-                "movie_id": row["movie_id"],
-                "avg_rating": round(float(row["avg_rating"]), 2),
-                "rating_count": row["rating_count"],
-                "last_watched": str(row["last_watched"])
-            } for row in watched]
-        }
-    finally:
-        conn.close()
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 
+                    w.movie_id,
+                    m.title as movie_title,
+                    w.watched_at,
+                    COALESCE(AVG(r.rating), 0) as avg_rating,
+                    COUNT(r.rating) as rating_count
+                FROM movie_watchlist w
+                JOIN movies m ON w.movie_id = m.id
+                JOIN group_members gm ON w.group_id = gm.group_id
+                LEFT JOIN ratings r ON w.movie_id = r.movie_id AND r.user_id = gm.user_id
+                WHERE w.group_id = %s AND w.watched_at IS NOT NULL
+                GROUP BY w.movie_id, m.title, w.watched_at
+                ORDER BY w.watched_at DESC
+                """,
+                (group_id,)
+            )
+            
+            watched = cursor.fetchall()
+            
+            return {
+                "group_id": group_id,
+                "count": len(watched),
+                "movies": [{
+                    "movie_id": row["movie_id"],
+                    "movie_title": row["movie_title"],
+                    "avg_rating": round(float(row["avg_rating"]), 2),
+                    "rating_count": row["rating_count"],
+                    "watched_at": str(row["watched_at"])
+                } for row in watched]
+            }
